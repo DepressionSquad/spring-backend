@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Check if there are any staged Java or Gradle files
+staged_files=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(java|gradle|kts)$' || true)
+
+if [ -z "$staged_files" ]; then
+    exit 0
+fi
+
+echo "🔍 Isolating staged changes..."
+
+# 1. Stash unstaged changes (including untracked files) so Spotless/PMD only see what is being committed
+stashed=false
+if ! git diff --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    git stash push --keep-index --include-untracked --quiet -m "pre-commit-temp-stash"
+    stashed=true
+fi
+
+# Ensure unstaged changes are always restored, even if Gradle fails
+cleanup() {
+    if [ "$stashed" = true ]; then
+        echo "♻️ Restoring unstaged changes..."
+        git stash pop --quiet || {
+            echo "⚠️ Merge conflict while restoring unstaged changes. Check 'git stash list'."
+            exit 1
+        }
+    fi
+}
+trap cleanup EXIT
+
+echo "✨ Running Spotless..."
+./gradlew spotlessApply --daemon --quiet
+
+# Re-stage any files modified by Spotless
+for file in $staged_files; do
+    if [ -f "$file" ]; then
+        git add "$file"
+    fi
+done
+
+echo "🛡️ Running PMD..."
+if ! ./gradlew pmdMain pmdTest --daemon --quiet; then
+    echo "❌ PMD found violations! Fix them before committing."
+    exit 1
+fi
+
+echo "✅ Spotless and PMD passed!"
